@@ -17,15 +17,15 @@ const pool = new Pool({
  * @param {String} email The email of the user.
  * @return {Promise<{}>} A promise to the user.
  */
-const getUserWithEmail = function (email) {
+const getUserWithEmail = function (email_id) {
+  const email = email_id.toLowerCase();
   let querString = `SELECT * 
   FROM users
   WHERE users.email = $1`;
   //query from database
   return pool
-    .query(querString, [email])
+    .query(querString, [email]) // case insensitive
     .then((result) => {
-      console.log(result.rows[0]);
       return result.rows[0];
     })
     .catch((err) => {
@@ -46,7 +46,6 @@ const getUserWithId = function (id) {
   return pool
     .query(querString, [id])
     .then((result) => {
-      console.log(result.rows[0]);
       return result.rows[0];
     })
     .catch((err) => {
@@ -63,7 +62,7 @@ const addUser = function (user) {
   //Query used RETURNING id instead of to get the id.
   let querString = `INSERT INTO 
   users(name, email, password)
-  VALUES($1, $2, $3) RETURNING id;`;
+  VALUES($1, $2, $3) RETURNING *;`;
   const values = [user.name, user.email, user.password];
   //query from database
   return (
@@ -86,8 +85,10 @@ const addUser = function (user) {
  * @param {string} guest_id The id of the user.
  * @return {Promise<[{}]>} A promise to the reservations.
  */
+
+// need Work
 const getAllReservations = function (guest_id, limit = 10) {
-  queryString = `SELECT reservations.id, properties.title, properties.cost_per_night, reservations.start_date, avg(rating) as average_rating
+  queryString = `SELECT properties.*, reservations.*, avg(rating) as average_rating
   FROM reservations
   JOIN properties ON reservations.property_id = properties.id
   JOIN property_reviews ON properties.id = property_reviews.property_id  
@@ -100,8 +101,7 @@ const getAllReservations = function (guest_id, limit = 10) {
   return pool
     .query(queryString, values)
     .then((res) => {
-      console.log(res);
-      return res;
+      return res.rows;
     })
     .catch((err) => {
       console.log("getAllReservations Error", err);
@@ -116,14 +116,88 @@ const getAllReservations = function (guest_id, limit = 10) {
  * @param {*} limit The number of results to return.
  * @return {Promise<[{}]>}  A promise to the properties.
  */
-const getAllProperties = (options, limit = 10) => {
+const getAllProperties = function (options, limit = 10) {
+  // 1
+  const queryParams = [];
+  const wheres = [];
+  // 2
+  let queryString = `
+  SELECT properties.*, avg(property_reviews.rating) as average_rating
+  FROM properties
+  JOIN property_reviews ON properties.id = property_id
+  `;
+
+  // 3a search with city name
+  if (options.city) {
+    queryParams.push(`%${options.city}%`);
+    queryString += `WHERE city LIKE $${queryParams.length} `;
+  }
+
+  //3b search with owner id
+  if (options.owner_id) {
+    queryParams.push(`%${options.owner_id}%`);
+
+    //If where clause not present
+    if (queryString.includes("WHERE")) {
+      queryString += `AND owner_id = $${queryParams.length} `;
+    }
+    // If owner id is the second parameter
+    else {
+      queryString += `WHERE owner_id = $${queryParams.length} `;
+    }
+  }
+  //3c If a minimum_price_per_night and a maximum_price_per_night, only return properties within that price range.
+  if (options.minimum_price_per_night && options.maximum_price_per_night) {
+    queryParams.push(
+      //convert dollars to cents.
+      options.minimum_price_per_night * 100,
+      options.maximum_price_per_night * 100
+    );
+    //If where clause not present
+    if (queryString.includes("WHERE")) {
+      // min value
+      queryString += `AND cost_per_night >= $${
+        queryParams.length - 1
+      } AND cost_per_night <= $${queryParams.length}`;
+    }
+    // If where clause present in the query string
+    else {
+      queryString += `WHERE cost_per_night >= $${
+        queryParams.length - 1
+      } AND cost_per_night <= $${queryParams.length}`;
+    }
+  }
+  // 3d minimum_rating
+  if (options.minimum_rating) {
+    queryParams.push(`${options.minimum_rating}`);
+
+    //If where clause not present
+    if (queryString.includes("WHERE")) {
+      queryString += `AND rating  >= $${queryParams.length} `;
+    }
+    // If where clause present
+    else {
+      queryString += `WHERE rating  >= $${queryParams.length} `;
+    }
+  }
+
+  // 4 query post where clause
+  queryParams.push(limit);
+  queryString += `
+  GROUP BY properties.id
+  ORDER BY cost_per_night
+  LIMIT $${queryParams.length};
+  `;
+
+  // 5
+  console.log(queryString, queryParams);
+
+  // 6
   return pool
-    .query(`SELECT * FROM properties LIMIT $1`, [limit])
-    .then((result) => {
-      return result.rows;
-    })
+    .query(queryString, queryParams)
+    .then((res) => res.rows)
     .catch((err) => {
-      console.log(err.message);
+      return console.log("query error:", err);
     });
 };
 
@@ -133,10 +207,37 @@ const getAllProperties = (options, limit = 10) => {
  * @return {Promise<{}>} A promise to the property.
  */
 const addProperty = function (property) {
-  const propertyId = Object.keys(properties).length + 1;
-  property.id = propertyId;
-  properties[propertyId] = property;
-  return Promise.resolve(property);
+  const queryString = `
+    INSERT INTO properties (
+    owner_id, title, description, thumbnail_photo_url, cover_photo_url, cost_per_night, parking_spaces, number_of_bathrooms, number_of_bedrooms, country, street,city, province, post_code) 
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+    RETURNING *;`;
+
+  const values = [
+    property.owner_id,
+    property.title,
+    property.description,
+    property.thumbnail_photo_url,
+    property.cover_photo_url,
+    property.cost_per_night,
+    property.parking_spaces,
+    property.number_of_bathrooms,
+    property.number_of_bedrooms,
+    property.country,
+    property.street,
+    property.city,
+    property.province,
+    property.post_code,
+  ];
+
+  return pool
+    .query(queryString, values)
+    .then((res) => {
+      return res.rows[0];
+    })
+    .catch((err) => {
+      return console.log("query error:", err);
+    });
 };
 
 module.exports = {
